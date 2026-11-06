@@ -53,9 +53,10 @@ async function askOllama(prompt) {
           content: prompt
         }
       ],
+      format:"json",
       think:false,
       options:{
-        num_predict:300
+        num_predict:500
       },
       stream: false
     })
@@ -75,12 +76,110 @@ async function askOllama(prompt) {
   console.log("Generation duration:", data.eval_duration / 1e9, "seconds");
   return data.message.content;
 }
+
+async function extractClaims(segments) {
+   const prompt = `
+You are a factual claim extraction assistant.
+
+Analyze the following YouTube transcript segments.
+
+Extract every distinct, specific, verifiable factual claim
+from the transcript. Do not skip factual statements.
+Do not combine separate factual statements into one claim.
+For each claim, provide:
+- claim: A clear factual statement.
+- quote: The exact supporting text from the transcript.
+- timestamp: The start time of the supporting segment.
+
+Do not invent information.
+Do not extract opinions or vague statements.
+
+Return ONLY valid JSON in this format:
+
+{
+  "claims": [
+    {
+      "claim": "A factual statement",
+      "quote": "Exact transcript quote",
+      "timestamp": 12.5
+    }
+  ]
+}
+
+Transcript:
+${JSON.stringify(segments)}
+`;
+
+const response=await askOllama(prompt);
+
+const parsed =JSON.parse(response);
+
+return claimsSchema.parse(parsed).claims;
+
+}
  
 
+async function searchEvidence(claim) {
+  const results=await tvly.search(
+    claim,
+    {
+      searchDepth:"advanced",
+      maxResults:5
+    }
+  )
+  
+  return results.results;
+}
 
 
 
+async function analyzeEvidence(claim,result) {
+   const evidence=result.map((result,index)=>({
+    source:index+1,
+    title:result.title,
+    url:result.url,
+    content:result.content
+   }));
 
+   const prompt = `
+You are a strict fact-checking assistant.
+
+Evaluate the EXACT claim using the retrieved evidence.
+
+CLAIM:
+${claim}
+
+EVIDENCE:
+${JSON.stringify(evidence, null, 2)}
+
+RULES:
+1. Evaluate the exact claim. Never change its meaning.
+2. Compare numerical values carefully.
+3. A different numerical value contradicts the claim
+   when both refer to the same measurement.
+4. Never invent explanations to make a claim true.
+5. If evidence directly disagrees, return contradicted.
+6. If evidence is insufficient, return insufficient_evidence.
+
+Return ONLY valid JSON:
+
+{
+  "verdict": "supported | contradicted | mixed | insufficient_evidence",
+  "explanation": "Brief explanation based on evidence",
+  "source_indices": [1, 2]
+}
+
+Do not generate URLs.
+Do not use Markdown.
+Do not add text outside JSON.
+`;
+
+const response=await askOllama(prompt);
+console.log("Qwen raw response:", response);
+
+return response
+
+}
 
 
 
@@ -258,7 +357,54 @@ app.post('/test-ollama',async(req,res)=>{
 })
 
 
+app.post("/test-search", async (req, res) => {
+  try {
+    const { claim } = req.body;
 
+    if (!claim) {
+      return res.status(400).json({ error: "Claim is required" });
+    }
+
+    const results = await searchEvidence(claim);
+
+    res.status(200).json({
+      success: true,
+      results
+    });
+  } catch (error) {
+    console.error("Search error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+app.post('/test-fact-check',async (req,res)=>{
+  try{
+    const {claim}=req.body;
+
+    if(!claim){
+      return res.status(400).json({
+        error:"Claim is required"
+      })
+    }
+
+    const results=await searchEvidence(claim);
+     
+    const analysis=await analyzeEvidence(claim,results);
+
+    res.status(200).json({
+      success:true,
+      claim,
+      analysis
+    })
+  }catch(error){
+       console.error("Fact-check error",error)
+       res.status(500)
+       .json({
+        error:error.message
+       })
+  }
+})
 
 
 app.listen(3000, () => {
