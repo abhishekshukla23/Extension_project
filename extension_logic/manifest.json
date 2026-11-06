@@ -1,0 +1,31 @@
+{
+    "manifest_version":3,
+    "name":"Youtube transcipt",
+    "version":"1.0.0",
+    "description":"extension to fetch the yt videos transcript",
+    "permissions":[
+        "activeTab",
+        "storage",
+        "sidePanel"
+    ],
+    "host_permissions":[
+    "http://localhost:3000/*"
+   ],
+    "content_scripts":[
+      {
+        "matches":[ "*://www.youtube.com/*" ],
+        "js":["content.js"]
+      }
+    ],
+    "background":{
+        "service_worker":"background.js"
+    },
+   "action":{
+     "default_popup":
+         "popup.html"
+   },
+   "side_panel":{
+   "default_path": "sidepanel.html"
+   }
+}
+
