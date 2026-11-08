@@ -1,5 +1,5 @@
 import express from "express";
-import { z } from "zod";
+import { success, validate, z } from "zod";
 import { tavily } from "@tavily/core";
 import { fetchTranscript } from "youtube-transcript";
 import "dotenv/config";
@@ -37,7 +37,18 @@ const factCheckSchema=z.object(
     timestamp:z.number().finite().nonnegative().optional()
   }
 )
-
+const analysisSchema = z.object({
+  verdict: z.enum([
+    "supported",
+    "contradicted",
+    "mixed",
+    "insufficient_evidence"
+  ]),
+  explanation: z.string().min(1),
+  source_indices: z.array(z.number().int().positive()),
+  needs_more_research: z.boolean(),
+next_search_query: z.string().nullable()
+});
 async function askOllama(prompt) {
   const start=Date.now()
   const response = await fetch("http://localhost:11434/api/chat", {
@@ -93,6 +104,7 @@ For each claim, provide:
 
 Do not invent information.
 Do not extract opinions or vague statements.
+
 
 Return ONLY valid JSON in this format:
 
@@ -159,14 +171,21 @@ RULES:
    when both refer to the same measurement.
 4. Never invent explanations to make a claim true.
 5. If evidence directly disagrees, return contradicted.
-6. If evidence is insufficient, return insufficient_evidence.
+6. Decide whether the available evidence is sufficient
+   to reach a reliable verdict.
+7. If evidence is insufficient, set needs_more_research
+   to true and provide a specific next_search_query.
+8. If evidence is sufficient, set needs_more_research
+   to false and next_search_query to null.
 
 Return ONLY valid JSON:
 
 {
   "verdict": "supported | contradicted | mixed | insufficient_evidence",
   "explanation": "Brief explanation based on evidence",
-  "source_indices": [1, 2]
+  "source_indices": [1, 2],
+  "needs_more_research": false,
+  "next_search_query": null
 }
 
 Do not generate URLs.
@@ -176,8 +195,31 @@ Do not add text outside JSON.
 
 const response=await askOllama(prompt);
 console.log("Qwen raw response:", response);
+const parsed=JSON.parse(response);
+const validated = analysisSchema.parse(parsed);
+if (validated.source_indices.some(index => index > result.length)) {
+  throw new Error("Qwen returned an invalid source index");
+}
+const selectedSources=validated.source_indices
+.map(index=>result[index-1])
+.filter(Boolean)
+.map(source=>({
+  title:source.title,
+  url:source.url,
+  content:source.content
+})
+)
 
-return response
+return {
+  verdict: validated.verdict,
+  explanation: validated.explanation,
+  sources: selectedSources,
+  needs_more_research: validated.needs_more_research,
+  next_search_query: validated.next_search_query
+};
+
+
+
 
 }
 
@@ -357,54 +399,69 @@ app.post('/test-ollama',async(req,res)=>{
 })
 
 
-app.post("/test-search", async (req, res) => {
+// app.post("/test-search", async (req, res) => {
+//   try {
+//     const { claim } = req.body;
+
+//     if (!claim) {
+//       return res.status(400).json({ error: "Claim is required" });
+//     }
+
+//     const results = await searchEvidence(claim);
+
+//     res.status(200).json({
+//       success: true,
+//       results
+//     });
+//   } catch (error) {
+//     console.error("Search error:", error);
+//     res.status(500).json({ error: error.message });
+//   }
+// });
+
+async function factCheckWithResearch(claim) {
+  let evidence = await searchEvidence(claim);
+
+  let analysis = await analyzeEvidence(claim, evidence);
+
+  return analysis;
+}
+
+app.post('/fact-check',async (req,res)=>{
   try {
-    const { claim } = req.body;
+    const validation=factCheckSchema.safeParse(req.body)
 
-    if (!claim) {
-      return res.status(400).json({ error: "Claim is required" });
-    }
-
-    const results = await searchEvidence(claim);
-
-    res.status(200).json({
-      success: true,
-      results
-    });
-  } catch (error) {
-    console.error("Search error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-
-app.post('/test-fact-check',async (req,res)=>{
-  try{
-    const {claim}=req.body;
-
-    if(!claim){
+    if(!validation.success){
       return res.status(400).json({
-        error:"Claim is required"
+        success:FontFaceSetLoadEvent,
+        message:"invalid claim data",
+        errors:validation.error.issue
       })
     }
 
-    const results=await searchEvidence(claim);
-     
-    const analysis=await analyzeEvidence(claim,results);
+    const {claim,quote,timestamp}=validation.data;
 
-    res.status(200).json({
+    const analysis=await factCheckWithResearch(claim)
+
+    return res.status(200)
+    .json({
       success:true,
       claim,
+      quote,
+      timestamp,
       analysis
     })
-  }catch(error){
-       console.error("Fact-check error",error)
-       res.status(500)
-       .json({
-        error:error.message
-       })
+    
+  } catch (error) {
+    console.error("Fact-check error",error)
+    return res.status(500)
+    .json({
+      success:false,
+      message:"Unable to fact-check claim"
+    })
   }
 })
+
 
 
 app.listen(3000, () => {
